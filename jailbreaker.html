@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jailbreaker!</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #111;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 30px rgba(0, 255, 204, 0.4);
+            border: 4px solid #333;
+            border-radius: 8px;
+            background: #000;
+        }
+        canvas {
+            display: block;
+            background: #1e1e1e;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 18px;
+            font-weight: bold;
+            pointer-events: none;
+            text-shadow: 2px 2px #000;
+        }
+        .stat {
+            background: rgba(0, 0, 0, 0.6);
+            padding: 5px 12px;
+            border-radius: 4px;
+            border: 1px solid #555;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui-overlay">
+        <div id="room-name" class="stat">Room: Holding Cell</div>
+        <div id="player-stats" class="stat">HP: 3/3 | Sword: Basic</div>
+    </div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- GAME STATES ---
+const STATE = {
+    TITLE: 0,
+    PLAYING: 1,
+    GAMEOVER: 2,
+    VICTORY: 3
+};
+let gameState = STATE.TITLE;
+
+// --- INPUT HANDLING ---
+const keys = {};
+window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
+        e.preventDefault();
+    }
+    if (gameState === STATE.TITLE && (e.code === 'Space' || e.code === 'Enter')) {
+        initGame();
+    }
+    if ((gameState === STATE.GAMEOVER || gameState === STATE.VICTORY) && (e.code === 'Space' || e.code === 'Enter' || e.code === 'KeyR')) {
+        initGame();
+    }
+});
+window.addEventListener('keyup', e => {
+    keys[e.code] = false;
+});
+
+// --- GAME VARIABLES ---
+let player = {
+    x: 100,
+    y: 300,
+    w: 32,
+    h: 32,
+    speed: 4,
+    vx: 0,
+    vy: 0,
+    hp: 3,
+    maxHp: 3,
+    hasSword: false,
+    swordLevel: 0, // 0: None, 1: Wooden/Basic, 2: Enchanted McDonald's Sword
+    facing: 'right',
+    isSlipping: false,
+    slipTimer: 0
+};
+
+let currentRoom = 1; // 1: Holding Cell, 2: Security Corridor, 3: Maze & Boss
+let camera = { x: 0, y: 0 };
+
+// Interactive Objects & Entities
+let lever = { x: 700, y: 280, w: 32, h: 48, active: false };
+let tvSwitch = { x: 150, y: 150, w: 32, h: 32, active: false };
+let tvDisplayOn = false;
+let hiddenLadder = { x: 720, y: 520, w: 40, h: 60, revealed: false };
+let spilledOil = { x: 350, y: 250, w: 120, h: 80 };
+
+// Enemies & Boss
+let enemies = [];
+let boss = null;
+let particles = [];
+
+// --- ROOM INITIALIZATION ---
+function initRoom(roomNum) {
+    currentRoom = roomNum;
+    enemies = [];
+    boss = null;
+    particles = [];
+
+    if (roomNum === 1) {
+        player.x = 150;
+        player.y = 300;
+        lever = { x: 700, y: 280, w: 32, h: 48, active: false };
+    } else if (roomNum === 2) {
+        player.x = 80;
+        player.y = 300;
+        tvSwitch = { x: 150, y: 150, w: 32, h: 32, active: false };
+        tvDisplayOn = false;
+        // Add security guard bots in corridor
+        enemies.push({ x: 400, y: 200, w: 32, h: 32, speed: 2, dir: 1, patrolMin: 300, patrolMax: 650, hp: 2 });
+    } else if (roomNum === 3) {
+        player.x = 80;
+        player.y = 520;
+        hiddenLadder.revealed = false;
+        // Spawn Bat with McDonald's Boss
+        boss = {
+            x: 650,
+            y: 250,
+            w: 64,
+            h: 64,
+            hp: 15,
+            maxHp: 15,
+            speed: 2.5,
+            state: 'patrol',
+            timer: 0
+        };
+        // Add maze guards
+        enemies.push({ x: 250, y: 150, w: 32, h: 32, speed: 2, dir: 1, patrolMin: 200, patrolMax: 450, hp: 1 });
+        enemies.push({ x: 500, y: 450, w: 32, h: 32, speed: 2.5, dir: -1, patrolMin: 400, patrolMax: 700, hp: 1 });
+    }
+}
+
+function initGame() {
+    gameState = STATE.PLAYING;
+    player.hp = 3;
+    player.maxHp = 3;
+    player.swordLevel = 1; // Start with a basic blocky sword
+    player.hasSword = true;
+    player.isSlipping = false;
+    initRoom(1);
+}
+
+// --- UPDATE LOGIC ---
+function update() {
+    if (gameState !== STATE.PLAYING) return;
+
+    // Player movement with slip trap mechanic in Room 3
+    if (player.isSlipping) {
+        player.x += player.vx;
+        player.y += player.vy;
+        player.slipTimer--;
+        if (player.slipTimer <= 0) {
+            player.isSlipping = false;
+        }
+    } else {
+        let moveX = 0;
+        let moveY = 0;
+        if (keys['ArrowLeft'] || keys['KeyA']) { moveX = -1; player.facing = 'left'; }
+        if (keys['ArrowRight'] || keys['KeyD']) { moveX = 1; player.facing = 'right'; }
+        if (keys['ArrowUp'] || keys['KeyW']) { moveY = -1; player.facing = 'up'; }
+        if (keys['ArrowDown'] || keys['KeyS']) { moveY = 1; player.facing = 'down'; }
+
+        if (moveX !== 0 && moveY !== 0) {
+            moveX *= 0.7071;
+            moveY *= 0.7071;
+        }
+
+        player.x += moveX * player.speed;
+        player.y += moveY * player.speed;
+    }
+
+    // Room Boundaries & Collisions
+    if (currentRoom === 1) {
+        // Walls
+        if (player.x < 50) player.x = 50;
+        if (player.y < 100) player.y = 100;
+        if (player.y > 500 - player.h) player.y = 500 - player.h;
+
+        // Circular Prison Bars gate on the right (x: 700)
+        if (!lever.active && player.x > 670) {
+            player.x = 670;
+        }
+
+        // Check Lever interaction
+        if (keys['KeyE'] || keys['Space']) {
+            if (Math.abs(player.x - lever.x) < 40 && Math.abs(player.y - lever.y) < 40) {
+                lever.active = true;
+            }
+        }
+
+        // Transition to Room 2
+        if (lever.active) {
+            if (player.x > 730) {
+                initRoom(2);
+            }
+        } else {
+            if (player.x > 750 - player.w) player.x = 750 - player.w;
+        }
+    } 
+    else if (currentRoom === 2) {
+        // Corridor boundaries
+        if (player.x < 50) player.x = 50;
+        if (player.x > 730) {
+            initRoom(3); // Enter Maze/Boss room
+        }
+        if (player.y < 100) player.y = 100;
+        if (player.y > 500 - player.h) player.y = 500 - player.h;
+
+        // TV Switch interaction
+        if (keys['KeyE'] || keys['Space']) {
+            if (Math.abs(player.x - tvSwitch.x) < 40 && Math.abs(player.y - tvSwitch.y) < 40) {
+                tvSwitch.active = true;
+                tvDisplayOn = true;
+            }
+        }
+    }
+    else if (currentRoom === 3) {
+        // Maze walls & bounds
+        if (player.x < 50) player.x = 50;
+        if (player.x > 750 - player.w) player.x = 750 - player.w;
+        if (player.y < 50) player.y = 50;
+        if (player.y > 550 - player.h) player.y = 550 - player.h;
+
+        // Maze internal blocky walls
+        // Wall 1: Horizontal barrier
+        if (player.y > 200 && player.y < 230 && player.x < 550) {
+            if (player.y < 215) player.y = 200; else player.y = 230;
+        }
+        // Wall 2: Vertical barrier
+        if (player.x > 520 && player.x < 550 && player.y > 200 && player.y < 450) {
+            if (player.x < 535) player.x = 520; else player.x = 550;
+        }
+
+        // Slip Trap on Spilled Oil
+        if (!player.isSlipping && 
+            player.x + player.w > spilledOil.x && player.x < spilledOil.x + spilledOil.w &&
+            player.y + player.h > spilledOil.y && player.y < spilledOil.y + spilledOil.h) {
+            player.isSlipping = true;
+            player.slipTimer = 35;
+            player.vx = player.facing === 'left' ? -7 : (player.facing === 'right' ? 7 : 4);
+            player.vy = player.facing === 'up' ? -7 : 7;
+        }
+
+        // Reveal hidden ladder if boss is defeated
+        if (boss && boss.hp <= 0 && !hiddenLadder.revealed) {
+            hiddenLadder.revealed = true;
+        }
+
+        // Check Win Condition (Hidden Ladder escape)
+        if (hiddenLadder.revealed &&
+            player.x + player.w > hiddenLadder.x && player.x < hiddenLadder.x + hiddenLadder.w &&
+            player.y + player.h > hiddenLadder.y && player.y < hiddenLadder.y + hiddenLadder.h) {
+            gameState = STATE.VICTORY;
+        }
+    }
+
+    // Sword Attack Mechanic
+    if (keys['KeyJ'] || keys['KeyX'] || keys['KeyF']) {
+        if (!player.isAttacking) {
+            player.isAttacking = true;
+            player.attackCooldown = 15;
+            checkSwordHit();
+        }
+    }
+    if (player.attackCooldown > 0) {
+        player.attackCooldown--;
+        if (player.attackCooldown === 0) player.isAttacking = false;
+    }
+
+    // Update Enemies
+    enemies.forEach((en, index) => {
+        en.x += en.speed * en.dir;
+        if (en.x < en.patrolMin || en.x > en.patrolMax) {
+            en.dir *= -1;
+        }
+
+        // Collision with player
+        if (checkCollision(player, en)) {
+            hurtPlayer();
+        }
+    });
+
+    // Update Boss (Bat wielding McDonald's golden arches/fries sword)
+    if (boss && boss.hp > 0) {
+        // Move towards player
+        let dx = player.x - boss.x;
+        let dy = player.y - boss.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist > 2) {
+            boss.x += (dx / dist) * boss.speed;
+            boss.y += (dy / dist) * boss.speed;
+        }
+
+        // Boss collision with player
+        if (checkCollision(player, boss)) {
+            hurtPlayer();
+        }
+    }
+
+    // Update Particles
+    particles.forEach((p, index) => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+        if (p.life <= 0) particles.splice(index, 1);
+    });
+
+    // Update UI Stats Text
+    document.getElementById('room-name').innerText = 
+        currentRoom === 1 ? "Room: Holding Cell" : 
+        currentRoom === 2 ? "Room: Security Corridor" : "Room: Escape Maze & Boss Arena";
+    
+    let swordName = player.swordLevel === 2 ? "Enchanted Golden Arches" : "Basic Wooden Sword";
+    document.getElementById('player-stats').innerText = `HP: ${player.hp}/${player.maxHp} | Sword: ${swordName}`;
+}
+
+function checkCollision(a, b) {
+    return a.x < b.x + b.w &&
+           a.x + a.w > b.x &&
+           a.y < b.y + b.h &&
+           a.y + a.h > b.y;
+}
+
+function hurtPlayer() {
+    if (player.invincibleTimer && player.invincibleTimer > 0) return;
+    player.hp--;
+    player.invincibleTimer = 60; // 1 second invulnerability
+    if (player.hp <= 0) {
+        gameState = STATE.GAMEOVER;
+    }
+}
+if (player.invincibleTimer > 0) player.invincibleTimer--;
+
+function checkSwordHit() {
+    let reachBox = {
+        x: player.facing === 'left' ? player.x - 30 : player.x + player.w,
+        y: player.y - 10,
+        w: 30,
+        h: player.h + 20
+    };
+
+    // Check enemies
+    enemies.forEach((en, index) => {
+        if (checkCollision(reachBox, en)) {
+            en.hp--;
+            createSparks(en.x + en.w/2, en.y + en.h/2);
+            if (en.hp <= 0) {
+                enemies.splice(index, 1);
+            }
+        }
+    });
+
+    // Check Boss
+    if (boss && boss.hp > 0) {
+        if (checkCollision(reachBox, boss)) {
+            boss.hp--;
+            createSparks(boss.x + boss.w/2, boss.y + boss.h/2);
+            if (boss.hp <= 0) {
+                // Boss defeated! Upgrade sword to Enchanted McDonald's Sword!
+                player.swordLevel = 2;
+                hiddenLadder.revealed = true;
+            }
+        }
+    }
+}
+
+function createSparks(x, y) {
+    for (let i = 0; i < 8; i++) {
+        particles.push({
+            x: x,
+            y: y,
+            vx: (Math.random() - 0.5) * 6,
+            vy: (Math.random() - 0.5) * 6,
+            life: 20,
+            color: player.swordLevel === 2 ? '#ffcc00' : '#ff3333'
+        });
+    }
+}
+
+// --- RENDER GRAPHICS ---
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (gameState === STATE.TITLE) {
+        drawTitleScreen();
+        return;
+    }
+    if (gameState === STATE.GAMEOVER) {
+        drawGameOverScreen();
+        return;
+    }
+    if (gameState === STATE.VICTORY) {
+        drawVictoryScreen();
+        return;
+    }
+
+    // Draw Room Background & Architecture (Blocky Minecraft Style)
+    drawRoomEnvironment();
+
+    // Draw Interactive Objects
+    if (currentRoom === 1) {
+        drawLever();
+        drawPrisonBars();
+    } else if (currentRoom === 2) {
+        drawTVAndSwitch();
+    } else if (currentRoom === 3) {
+        drawMazeEnvironment();
+    }
+
+    // Draw Enemies & Boss
+    enemies.forEach(en => drawGuard(en));
+    if (boss && boss.hp > 0) {
+        drawBoss();
+    }
+
+    // Draw Particles
+    particles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, 4, 4);
+    });
+
+    // Draw Player
+    drawPlayer();
+}
+
+// --- DRAWING HELPERS ---
+function drawTitleScreen() {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = 'bold 54px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText("JAILBREAKER!", canvas.width / 2, 180);
+
+    ctx.fillStyle = '#00ffcc';
+    ctx.font = '22px "Courier New", monospace';
+    ctx.fillText("Blocky Prison Escape Adventure", canvas.width / 2, 230);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px "Courier New", monospace';
+    ctx.fillText("Controls:", canvas.width / 2, 310);
+    ctx.fillText("Move: WASD or Arrow Keys", canvas.width / 2, 350);
+    ctx.fillText("Interact: E or Space | Attack: J / X / F", canvas.width / 2, 390);
+
+    ctx.fillStyle = '#ff3366';
+    ctx.font = 'bold 24px "Courier New", monospace';
+    ctx.fillText("PRESS [SPACE] OR [ENTER] TO START", canvas.width / 2, 490);
+    ctx.textAlign = 'left';
+}
+
+function drawGameOverScreen() {
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#ff3333';
+    ctx.font = 'bold 50px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText("CAUGHT BY GUARDS!", canvas.width / 2, 220);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '22px "Courier New", monospace';
+    ctx.fillText("Don't give up! Try breaking out again.", canvas.width / 2, 300);
+
+    ctx.fillStyle = '#00ffcc';
+    ctx.font = 'bold 22px "Courier New", monospace';
+    ctx.fillText("PRESS [SPACE] TO TRY AGAIN", canvas.width / 2, 400);
+    ctx.textAlign = 'left';
+}
+
+function drawVictoryScreen() {
+    ctx.fillStyle = 'rgba(0,0,0,0.9)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#00ffcc';
+    ctx.font = 'bold 50px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText("YOU ESCAPED!", canvas.width / 2, 180);
+
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = '24px "Courier New", monospace';
+    ctx.fillText("You defeated the Bat McDonald's Boss & Mastered the Maze!", canvas.width / 2, 250);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px "Courier New", monospace';
+    ctx.fillText("Freedom tastes like crispy fries and victory!", canvas.width / 2, 320);
+
+    ctx.fillStyle = '#ff3366';
+    ctx.font = 'bold 22px "Courier New", monospace';
+    ctx.fillText("PRESS [SPACE] TO PLAY AGAIN", canvas.width / 2, 440);
+    ctx.textAlign = 'left';
+}
+
+function drawRoomEnvironment() {
+    // Floor stone block texture
+    ctx.fillStyle = '#2b2b2b';
+    ctx.fillRect(40, 80, 720, 440);
+
+    // Grid lines for blocky Minecraft aesthetic
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 2;
+    for (let x = 40; x <= 760; x += 40) {
+        ctx.beginPath(); ctx.moveTo(x, 80); ctx.lineTo(x, 520); ctx.stroke();
+    }
+    for (let y = 80; y <= 520; y += 40) {
+        ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(760, y); ctx.stroke();
+    }
+
+    // Room Stone Walls
+    ctx.fillStyle = '#444';
+    ctx.fillRect(40, 80, 720, 20); // Top wall
+    ctx.fillRect(40, 500, 720, 20); // Bottom wall
+    ctx.fillRect(40, 80, 20, 440); // Left wall
+    if (currentRoom === 1 && lever.active) {
+        // Open door corridor right
+        ctx.fillRect(740, 80, 20, 180);
+        ctx.fillRect(740, 340, 20, 180);
+    } else if (currentRoom === 1) {
+        ctx.fillRect(740, 80, 20, 440); // Closed right wall
+    } else if (currentRoom === 2) {
+        ctx.fillRect(740, 80, 20, 180);
+        ctx.fillRect(740, 340, 20, 180); // Open exit right
+    }
+}
+
+function drawPrisonBars() {
+    if (lever.active) return; // Bars retracted
+    // Circular prison bars on the right side
+    ctx.strokeStyle = '#cccccc';
+    ctx.lineWidth = 6;
+    let barX = 700;
+    for (let barY = 100; barY < 500; barY += 35) {
+        ctx.beginPath();
+        ctx.arc(barX, barY + 15, 14, 0, Math.PI * 2);
+        ctx.stroke();
+        // Inner cross bars
+        ctx.beginPath();
+        ctx.moveTo(barX - 10, barY + 15); ctx.lineTo(barX + 10, barY + 15);
+        ctx.moveTo(barX, barY + 5); ctx.lineTo(barX, barY + 25);
+        ctx.stroke();
+    }
+}
+
+function drawLever() {
+    // Lever base
+    ctx.fillStyle = '#666';
+    ctx.fillRect(lever.x, lever.y + 20, lever.w, 28);
+    // Lever handle
+    ctx.strokeStyle = lever.active ? '#00ffcc' : '#ff3333';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.moveTo(lever.x + 16, lever.y + 30);
+    ctx.lineTo(lever.active ? lever.x + 30 : lever.x - 10, lever.active ? lever.y - 5 : lever.y + 10);
+    ctx.stroke();
+    // Lever knob
+    ctx.fillStyle = lever.active ? '#00ffcc' : '#ff3333';
+    ctx.beginPath();
+    ctx.arc(lever.active ? lever.x + 30 : lever.x - 10, lever.active ? lever.y - 5 : lever.y + 10, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Prompt hint
+    if (Math.abs(player.x - lever.x) < 50 && Math.abs(player.y - lever.y) < 50 && !lever.active) {
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px "Courier New"';
+        ctx.fillText("Press [E] to Pull", lever.x - 20, lever.y - 15);
+    }
+}
+
+function drawTVAndSwitch() {
+    // Security TV Screen on Wall
+    ctx.fillStyle = '#111';
+    ctx.fillRect(320, 90, 180, 110);
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(320, 90, 180, 110);
+
+    if (tvDisplayOn) {
+        // TV displaying directional clues for the maze
+        ctx.fillStyle = '#00ffcc';
+        ctx.font = 'bold 14px "Courier New"';
+        ctx.fillText("CLUE: MAZE EXIT", 345, 118);
+        ctx.fillStyle = '#ffcc00';
+        ctx.font = 'bold 18px "Courier New"';
+        ctx.fillText("=> UP, RIGHT, DOWN", 335, 150);
+        ctx.fillText("=> DEFEAT BAT BOSS", 330, 175);
+    } else {
+        ctx.fillStyle = '#333';
+        ctx.font = '12px "Courier New"';
+        ctx.fillText("[ NO SIGNAL ]", 365, 150);
+    }
+
+    // Wall Switch
+    ctx.fillStyle = tvSwitch.active ? '#00ffcc' : '#888';
+    ctx.fillRect(tvSwitch.x, tvSwitch.y, tvSwitch.w, tvSwitch.h);
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(tvSwitch.x, tvSwitch.y, tvSwitch.w, tvSwitch.h);
+
+    if (Math.abs(player.x - tvSwitch.x) < 50 && Math.abs(player.y - tvSwitch.y) < 50 && !tvSwitch.active) {
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px "Courier New"';
+        ctx.fillText("Press [E] to Turn TV On", tvSwitch.x - 30, tvSwitch.y - 10);
+    }
+}
+
+function drawMazeEnvironment() {
+    // Draw blocky maze internal walls
+    ctx.fillStyle = '#553311'; // Wood/Stone block walls
+    // Wall 1
+    ctx.fillRect(80, 200, 470, 30);
+    ctx.strokeStyle = '#331a00';
+    ctx.strokeRect(80, 200, 470, 30);
+
+    // Wall 2
+    ctx.fillRect(520, 200, 30, 250);
+    ctx.strokeRect(520, 200, 30, 250);
+
+    // Spill Oil trap
+    ctx.fillStyle = 'rgba(80, 80, 80, 0.7)';
+    ctx.fillRect(spilledOil.x, spilledOil.y, spilledOil.w, spilledOil.h);
+    ctx.fillStyle = '#222';
+    ctx.font = 'bold 12px "Courier New"';
+    ctx.fillText("SLIPPERY OIL!", spilledOil.x + 10, spilledOil.y + 45);
+
+    // Hidden Ladder to Escape
+    if (hiddenLadder.revealed) {
+        ctx.fillStyle = '#cc9900';
+        ctx.fillRect(hiddenLadder.x, hiddenLadder.y, hiddenLadder.w, hiddenLadder.h);
+        ctx.fillStyle = '#996600';
+        for (let ly = hiddenLadder.y + 10; ly < hiddenLadder.y + hiddenLadder.h; ly += 15) {
+            ctx.fillRect(hiddenLadder.x + 5, ly, hiddenLadder.w - 10, 6);
+        }
+        ctx.fillStyle = '#00ffcc';
+        ctx.font = 'bold 14px "Courier New"';
+        ctx.fillText("ESCAPE!", hiddenLadder.x - 10, hiddenLadder.y - 10);
+    }
+}
+
+function drawGuard(en) {
+    // Blocky prison guard NPC
+    ctx.fillStyle = '#3366cc'; // Blue guard uniform
+    ctx.fillRect(en.x, en.y, en.w, en.h);
+    // Hat
+    ctx.fillStyle = '#113366';
+    ctx.fillRect(en.x + 4, en.y - 4, en.w - 8, 8);
+    // Face
+    ctx.fillStyle = '#ffccaa';
+    ctx.fillRect(en.x + 8, en.y + 8, 16, 12);
+}
+
+function drawBoss() {
+    // Bat wielding McDonald's boss (Blocky style with wings & golden arches weapon)
+    ctx.fillStyle = '#6600cc'; // Purple bat body
+    ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+
+    // Wings
+    ctx.fillStyle = '#440088';
+    let wingFlap = Math.floor(Date.now() / 150) % 2 === 0;
+    if (wingFlap) {
+        ctx.fillRect(boss.x - 24, boss.y + 10, 24, 20);
+        ctx.fillRect(boss.x + boss.w, boss.y + 10, 24, 20);
+    } else {
+        ctx.fillRect(boss.x - 16, boss.y - 10, 16, 20);
+        ctx.fillRect(boss.x + boss.w, boss.y - 10, 16, 20);
+    }
+
+    // Boss Weapon (McDonald's Golden Arches / Fries Sword)
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillRect(boss.x + boss.w - 10, boss.y + 10, 20, 36);
+    ctx.fillStyle = '#ff0033'; // Red fry box holder
+    ctx.fillRect(boss.x + boss.w - 5, boss.y + 30, 10, 16);
+
+    // Boss Health Bar
+    ctx.fillStyle = '#444';
+    ctx.fillRect(boss.x, boss.y - 16, boss.w, 8);
+    ctx.fillStyle = '#ff3333';
+    ctx.fillRect(boss.x, boss.y - 16, boss.w * (boss.hp / boss.maxHp), 8);
+}
+
+function drawPlayer() {
+    // Blocky Minecraft-style player character
+    ctx.fillStyle = player.isSlipping ? '#00ffff' : '#ff3366'; // Red prisoner jumpsuit
+    ctx.fillRect(player.x, player.y, player.w, player.h);
+
+    // Head
+    ctx.fillStyle = '#ffccaa';
+    ctx.fillRect(player.x + 6, player.y + 4, 20, 16);
+
+    // Eyes / Hat
+    ctx.fillStyle = '#222';
+    if (player.facing === 'left') {
+        ctx.fillRect(player.x + 8, player.y + 10, 4, 4);
+    } else {
+        ctx.fillRect(player.x + 20, player.y + 10, 4, 4);
+    }
+
+    // Sword in hand
+    if (player.hasSword) {
+        if (player.swordLevel === 2) {
+            // Enchanted McDonald's Golden Sword upgrade (Glowing yellow & red)
+            ctx.fillStyle = Math.floor(Date.now() / 100) % 2 === 0 ? '#ffcc00' : '#ffffff';
+        } else {
+            // Basic wooden sword
+            ctx.fillStyle = '#996633';
+        }
+
+        let swordX = player.facing === 'left' ? player.x - 16 : player.x + player.w;
+        let swordY = player.y + 12;
+        ctx.fillRect(swordX, swordY, 16, 6);
+        if (player.swordLevel === 2) {
+            // Extra glowing fries sparks on enchanted sword
+            ctx.fillStyle = '#ff3300';
+            ctx.fillRect(swordX + 4, swordY - 4, 8, 4);
+        }
+    }
+}
+
+// --- GAME LOOP ---
+function mainLoop() {
+    update();
+    draw();
+    requestAnimationFrame(mainLoop);
+}
+
+// Start loop
+requestAnimationFrame(mainLoop);
+
+</script>
+</body>
+</html>
